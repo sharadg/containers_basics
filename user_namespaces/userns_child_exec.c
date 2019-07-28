@@ -32,34 +32,38 @@ struct child_args {
 
 static int verbose;
 
-static void
-usage(char *pname)
-{
-    fprintf(stderr, "Usage: %s [options] cmd [arg...]\n\n", pname);
-    fprintf(stderr, "Create a child process that executes a shell command "
-            "in a new user namespace,\n"
-            "and possibly also other new namespace(s).\n\n");
-    fprintf(stderr, "Options can be:\n\n");
+static void usage(char *pname) {
+  fprintf(stderr, "Usage: %s [options] cmd [arg...]\n\n", pname);
+  fprintf(stderr, "Create a child process that executes a shell "
+          "command in a new user namespace,\n"
+          "and possibly also other new namespace(s).\n\n");
+  fprintf(stderr, "Options can be:\n\n");
 #define fpe(str) fprintf(stderr, "    %s", str);
-    fpe("-i          New IPC namespace\n");
-    fpe("-m          New mount namespace\n");
-    fpe("-n          New network namespace\n");
-    fpe("-p          New PID namespace\n");
-    fpe("-u          New UTS namespace\n");
-    fpe("-U          New user namespace\n");
-    fpe("-M uid_map  Specify UID map for user namespace\n");
-    fpe("-G gid_map  Specify GID map for user namespace\n");
-    fpe("            If -M or -G is specified, -U is required\n");
-    fpe("-v          Display verbose messages\n");
-    fpe("\n");
-    fpe("Map strings for -M and -G consist of records of the form:\n");
-    fpe("\n");
-    fpe("    ID-inside-ns   ID-outside-ns   len\n");
-    fpe("\n");
-    fpe("A map string can contain multiple records, separated by commas;\n");
-    fpe("the commas are replaced by newlines before writing to map files.\n");
-
-    exit(EXIT_FAILURE);
+  fpe("-i          New IPC namespace\n");
+  fpe("-m          New mount namespace\n");
+  fpe("-n          New network namespace\n");
+  fpe("-p          New PID namespace\n");
+  fpe("-u          New UTS namespace\n");
+  fpe("-U          New user namespace\n");
+  fpe("-M uid_map  Specify UID map for user namespace\n");
+  fpe("-G gid_map  Specify GID map for user namespace\n");
+  fpe("-z          Map user's UID and GID to 0 in user namespace\n");
+  fpe("            (equivalent to: -M '0 <uid> 1' -G '0 <gid> 1')\n");
+  fpe("-v          Display verbose messages\n");
+  fpe("\n");
+  fpe("If -z, -M, or -G is specified, -U is required.\n");
+  fpe("It is not permitted to specify both -z and either -M or -G.\n");
+  fpe("\n");
+  fpe("Map strings for -M and -G consist of records of the form:\n");
+  fpe("\n");
+  fpe("    ID-inside-ns   ID-outside-ns   len\n");
+  fpe("\n");
+  fpe("A map string can contain multiple records, separated"
+      " by commas;\n");
+  fpe("the commas are replaced by newlines before writing"
+      " to map files.\n");
+  
+  exit(EXIT_FAILURE);
 }
 
 /* Update the mapping file 'map_file', with the value provided in
@@ -101,11 +105,58 @@ update_map(char *mapping, char *map_file)
     close(fd);
 }
 
+/* Linux 3.19 made a change in the handling of setgroups(2) and the
+   'gid_map' file to address a security issue. The issue allowed
+   *unprivileged* users to employ user namespaces in order to drop
+   The upshot of the 3.19 changes is that in order to update the
+   'gid_maps' file, use of the setgroups() system call in this
+   user namespace must first be disabled by writing "deny" to one of
+   the /proc/PID/setgroups files for this namespace.  That is the
+   purpose of the following function. */
+
+static void
+proc_setgroups_write(pid_t child_pid, char *str)
+{
+  char setgroups_path[PATH_MAX];
+  int fd;
+  
+  snprintf(setgroups_path, PATH_MAX, "/proc/%ld/setgroups",
+           (long) child_pid);
+  
+  fd = open(setgroups_path, O_RDWR);
+  if (fd == -1) {
+    
+    /* We may be on a system that doesn't support
+       /proc/PID/setgroups. In that case, the file won't exist,
+       and the system won't impose the restrictions that Linux 3.19
+       added. That's fine: we don't need to do anything in order
+       to permit 'gid_map' to be updated.
+       
+       However, if the error from open() was something other than
+       the ENOENT error that is expected for that case,  let the
+       user know. */
+    
+    if (errno != ENOENT)
+      fprintf(stderr, "ERROR: open %s: %s\n", setgroups_path,
+              strerror(errno));
+    return;
+  }
+  
+  if (write(fd, str, strlen(str)) == -1)
+    fprintf(stderr, "ERROR: write %s: %s\n", setgroups_path,
+            strerror(errno));
+  
+  close(fd);
+}
+
+
 static int              /* Start function for cloned child */
 childFunc(void *arg)
 {
     struct child_args *args = (struct child_args *) arg;
     char ch;
+
+    sleep(2);
 
     /* Wait until the parent has updated the UID and GID mappings. See
        the comment in main(). We wait for end of file on a pipe that will
@@ -114,6 +165,7 @@ childFunc(void *arg)
     close(args->pipe_fd[1]);    /* Close our descriptor for the write end
                                    of the pipe so that we see EOF when
                                    parent closes its descriptor */
+
     if (read(args->pipe_fd[0], &ch, 1) != 0) {
         fprintf(stderr, "Failure in child: read from pipe returned != 0\n");
         exit(EXIT_FAILURE);
@@ -132,10 +184,12 @@ static char child_stack[STACK_SIZE];    /* Space for child's stack */
 int
 main(int argc, char *argv[])
 {
-    int flags, opt;
+  int flags, opt, map_zero;
     pid_t child_pid;
     struct child_args args;
     char *uid_map, *gid_map;
+    const int MAP_BUF_SIZE = 100;
+    char map_buf[MAP_BUF_SIZE];
     char map_path[PATH_MAX];
 
     /* Parse command-line options. The initial '+' character in
@@ -149,7 +203,8 @@ main(int argc, char *argv[])
     verbose = 0;
     gid_map = NULL;
     uid_map = NULL;
-    while ((opt = getopt(argc, argv, "+imnpuUM:G:v")) != -1) {
+    map_zero= 0;
+    while ((opt = getopt(argc, argv, "+imnpuUM:G:vz")) != -1) {
         switch (opt) {
         case 'i': flags |= CLONE_NEWIPC;        break;
         case 'm': flags |= CLONE_NEWNS;         break;
@@ -157,6 +212,7 @@ main(int argc, char *argv[])
         case 'p': flags |= CLONE_NEWPID;        break;
         case 'u': flags |= CLONE_NEWUTS;        break;
         case 'v': verbose = 1;                  break;
+        case 'z': map_zero = 1;                 break;
         case 'M': uid_map = optarg;             break;
         case 'G': gid_map = optarg;             break;
         case 'U': flags |= CLONE_NEWUSER;       break;
@@ -166,9 +222,10 @@ main(int argc, char *argv[])
 
     /* -M or -G without -U is nonsensical */
 
-    if ((uid_map != NULL || gid_map != NULL) &&
-            !(flags & CLONE_NEWUSER))
-        usage(argv[0]);
+    if (((uid_map != NULL || gid_map != NULL || map_zero) &&
+         !(flags & CLONE_NEWUSER)) ||
+        (map_zero && (uid_map != NULL || gid_map != NULL)))
+      usage(argv[0]);
 
     args.argv = &argv[optind];
 
@@ -199,18 +256,29 @@ main(int argc, char *argv[])
                 argv[0], (long) child_pid);
 
     /* Update the UID and GID maps in the child */
-
-    if (uid_map != NULL) {
-        snprintf(map_path, PATH_MAX, "/proc/%ld/uid_map",
-                (long) child_pid);
-        update_map(uid_map, map_path);
+    
+    if (uid_map != NULL || map_zero) {
+      snprintf(map_path, PATH_MAX, "/proc/%ld/uid_map",
+               (long) child_pid);
+      if (map_zero) {
+        snprintf(map_buf, MAP_BUF_SIZE, "0 %ld 1", (long) getuid());
+        uid_map = map_buf;
+      }
+      update_map(uid_map, map_path);
     }
-    if (gid_map != NULL) {
-        snprintf(map_path, PATH_MAX, "/proc/%ld/gid_map",
-                (long) child_pid);
-        update_map(gid_map, map_path);
+    
+    if (gid_map != NULL || map_zero) {
+      proc_setgroups_write(child_pid, "deny");
+      
+      snprintf(map_path, PATH_MAX, "/proc/%ld/gid_map",
+               (long) child_pid);
+      if (map_zero) {
+        snprintf(map_buf, MAP_BUF_SIZE, "0 %ld 1", (long) getgid());
+        gid_map = map_buf;
+      }
+      update_map(gid_map, map_path);
     }
-
+    
     /* Close the write end of the pipe, to signal to the child that we
        have updated the UID and GID maps */
 
