@@ -1,0 +1,13 @@
+*when a process with non-zero user IDs performs an execve(), the process's capability sets are cleared*
+
+To avoid this problem, it is necessary to create a user ID mapping inside the user namespace before performing the execve()
+
+User namespaces change the way in which (effective) capabilities are interpreted
+
+having a capability inside a particular user namespace allows a process to perform operations only on resources governed by that namespace
+
+whether or not a process has capabilities in a particular user namespace depends on its namespace membership and the parental relationship between user namespaces
+
+When a new IPC, mount, network, PID, or UTS namespace is created via clone() or unshare(), the kernel records the user namespace of the creating process against the new namespace. Whenever a process operates on global resources governed by a namespace, permission checks are performed according to the process's capabilities in the user namespace that the kernel associated with the that namespace
+
+

@@ -3,3 +3,4 @@
 **/rootfs*
 .vscode
 .idea
+bin
