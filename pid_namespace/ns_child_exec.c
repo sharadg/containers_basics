@@ -83,8 +83,8 @@ main(int argc, char *argv[])
         errExit("clone");
 
     if (verbose)
-        printf("%s: PID of child created by clone() is %ld\n",
-                argv[0], (long) child_pid);
+        printf("%s [PID: %ld]: PID of child created by clone() is %ld\n",
+                argv[0], (long) getpid(), (long) child_pid);
 
     /* Parent falls through to here */
 
