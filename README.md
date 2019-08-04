@@ -316,7 +316,256 @@ This will be our main sequence of activities while creating our own container ru
 
 ## Containter networking (veth pairs)
 
-Please see a very good explanation of [container networking using veth pairs](http://tejom.github.io/c/linux/containers/docker/networking/2016/10/08/containers-from-scratch-pt2-networking.html)
+Please see a very good explanation of [container networking using veth pairs.](http://tejom.github.io/c/linux/containers/docker/networking/2016/10/08/containers-from-scratch-pt2-networking.html)
 
 
 ## Combining everything into a running container
+
+We are now going to create our [basic_container.c](basic_container/basic_container.) program which will allow us to specify an IP address as well as the program to run inside the container. The main constructs we are using in this program are:
+
+- mapping userid inside the container
+  
+  Creating a new user namespace allows you to specify `uid_map` and `gid_map` such that you can specify that the `root` user inside the new namespace maps to what user and groupid outside the new namespace (i.e. in the parent or global namespace). We use this mechanism to give our contained user an identify outside its namespace and for effective security controls in the global namespace.
+
+  ```
+  snprintf(map_path, PATH_MAX, "/proc/%ld/uid_map", (long) child_pid);
+  snprintf(map_buf, MAP_BUF_SIZE, "0 %ld 1", (long) getuid());
+  uid_map = map_buf;
+  update_map(uid_map, map_path);
+  
+  proc_setgroups_write(child_pid, "deny");
+  
+  snprintf(map_path, PATH_MAX, "/proc/%ld/gid_map", (long) child_pid);
+  snprintf(map_buf, MAP_BUF_SIZE, "0 %ld 1", (long) getgid());
+  gid_map = map_buf;
+  update_map(gid_map, map_path);
+  ```
+
+- create veth pairs and setup the bridge for networking
+
+  Before calling `clone` we setup a veth pair and add it to the bridge (from parent namespace)
+
+  ```
+  rand_char(id, 4);
+  printf("id is %s\n", id);
+  asprintf(&set_int, "ip link add veth%s type veth peer name veth1", id);
+  system(set_int);
+  asprintf(&set_int_up, "ip link set veth%s up", id);
+  system(set_int_up);
+  asprintf(&add_to_bridge, "ip link set veth%s master %s", id, BRIDGE);
+  system(add_to_bridge);
+  ```
+
+- clone 
+  
+  Now, we are passing all the relevant flags to `clone` to carve out separate namespaces inside our container.
+
+  ```
+  child_pid = clone(childFunc, child_stack + STACK_SIZE, 
+                      SIGCHLD | CLONE_NEWIPC | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWUSER,
+                      &argv[1]);
+  ```
+
+- `ip link set x netns`
+
+  We use `ip` utility to add veth interface to newly created network namespace
+
+  ```
+  asprintf(&set_pid_ns, "ip link set veth1 netns %d", pid);
+  system(set_pid_ns);
+  ```
+
+- pivot_root
+
+  As we pass a `rootfs` to our container, we want to make sure that the container is jail-rooted inside that rootfs. `chroot` is not inherently secure and `pivot_root` gives us the mechanics to achieve the rootfs isolation in a more secure manner.
+
+  ```
+  int pivot_root(char *a, char *b) {
+    if (mount(a, a, "bind", MS_BIND | MS_REC, "") < 0) {
+      errExit("error mount");
+    }                                                                                                                                                                           
+    printf("pivot setup ok\n");
+    return syscall(SYS_pivot_root, a, b);
+  }
+  
+  # and we will use it so:
+  
+  if (pivot_root("./rootfs", "./rootfs/.old") < 0) {
+    errExit("error pivot");
+  }
+  
+  # and unmount the /.old
+  umount2("/.old", MNT_DETACH);
+  ```
+
+- mounting separate procfs
+
+  Just as we saw previously, when we start off with a new mount namespace, we get the global namespace's snapshot of processes at `/proc` so we need to re-mount `procfs` so we only know about our (namespace's) set of processes
+
+  ```
+  if (mount("proc", "/proc", "proc", 0, NULL) < 0)
+    errExit("error mounting new procfs");
+  ```
+
+- execve
+
+  And, finally we execute `execvp` system call to run the program inside the container
+
+  ```
+  execvp(argv[1], &argv[1]);
+  ```
+
+# Running the container
+
+1. Create our basic container runtime
+  
+    ```
+    cd basic_container
+    make
+    
+    cd ..
+    ```
+
+2. Setup network bridge
+  
+    ```
+    # run setup_bridge.sh once to add the bridge before creating the container
+    
+    cat setup_bridge.sh 
+    #! /bin/bash
+    
+    brctl addbr cni0
+    ip link set cni0 up
+    ip addr add 10.240.0.1/24 dev cni0
+    
+    sudo ./setup_bridge.sh
+    ```
+
+3. Run basic container
+
+  
+    ```
+    # create a folder for container1 and rootfs inside it (need to cleanup this step)
+    mkdir container1
+    cd container1
+    mkdir rootfs
+    tar xvf rootfs.tar -C ./rootfs
+    
+    sudo ../basic_container/bin/basic_container 10.240.0.2 bash
+    [In main namespace] starting...
+    id is ZNFO
+    [In main namespace] ../basic_container/bin/basic_container: PID of child created by clone    () is 31499
+    [In child namespace] childFunc(): PID  = 1
+    [In child namespace] childFunc(): PPID = 0
+    [In child namespace] uts.nodename in child:  inside_container
+    pivot setup ok
+    
+    # check that you can only see container processes
+    root@inside_container:/# ps -efl 
+    F S UID        PID  PPID  C PRI  NI ADDR SZ WCHAN  STIME TTY          TIME CMD
+    4 S root         1     0  0  80   0 -  4627 wait   15:29 ?        00:00:00 bash
+    0 R root        12     1  0  80   0 -  8600 -      15:30 ?        00:00:00 ps -efl
+    
+    # check to see the network interface is attached
+    root@inside_container:/# ip link list
+    1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+        link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    5: veth1@if6: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode     DEFAULT group default qlen 1000
+        link/ether 6a:8c:13:c6:3e:37 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    ```
+
+    Repeat steps above to create a second container
+
+    ```
+    # create a folder for container2 and rootfs inside it (need to cleanup this step)
+    mkdir container2
+    cd container2
+    mkdir rootfs
+    tar xvf rootfs.tar -C ./rootfs
+
+    sudo ../basic_container/bin/basic_container 10.240.0.3 bash
+    [sudo] password for sharadg:       
+    [In main namespace] starting...
+    id is OTBI
+    [In main namespace] ../basic_container/bin/basic_container: PID of child created by clone    () is 32632
+    [In child namespace] childFunc(): PID  = 1
+    [In child namespace] childFunc(): PPID = 0
+    [In child namespace] uts.nodename in child:  inside_container
+    pivot setup ok
+    
+    root@inside_container:/# ip link list
+    1: lo: <LOOPBACK> mtu 65536 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+        link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    7: veth1@if8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode     DEFAULT group default qlen 1000
+        link/ether ea:e4:63:f1:07:a6 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    
+    root@inside_container:/# ps -efl
+    F S UID        PID  PPID  C PRI  NI ADDR SZ WCHAN  STIME TTY          TIME CMD
+    4 S root         1     0  0  80   0 -  4627 wait   15:35 ?        00:00:00 bash
+    0 R root        11     1  0  80   0 -  8600 -      15:36 ?        00:00:00 ps -efl
+    ```
+
+    From the parent shell, you can confirm that 2 veth interfaces were created and attahed to the bridge
+
+    ```
+    brctl show cni0
+    bridge name	bridge id		STP enabled	interfaces
+    cni0		8000.06a6e6b08ade	no		vethOTBI
+    							vethZNFO
+    ```
+
+4. Setup forwarding rules so container-to-container networking works
+
+    You would notice that with just this much setup, you can ping the newly created container from the parent shell
+
+    ```
+    # from parent shell
+
+    ping 10.240.0.2
+    PING 10.240.0.2 (10.240.0.2) 56(84) bytes of data.
+    64 bytes from 10.240.0.2: icmp_seq=1 ttl=64 time=0.049 ms
+    64 bytes from 10.240.0.2: icmp_seq=2 ttl=64 time=0.036 ms
+    64 bytes from 10.240.0.2: icmp_seq=3 ttl=64 time=0.075 ms
+    ```
+
+    But, you would not be able to ping one container from another container. In order to make that work, setup `iptables` forwarding rules from the parent shell
+
+    ```
+    # in parent shell
+
+    cat setup_forwarding.sh 
+    #! /bin/bash
+    
+    iptables -A FORWARD -s 10.240.0.0/16 -j ACCEPT
+    iptables -A FORWARD -d 10.240.0.0/16 -j ACCEPT
+    iptables -t nat -A POSTROUTING -s 10.240.0.0/24 ! -o cni0 -j MASQUERADE
+
+    sudo ./setup_forwarding.sh
+    ```
+
+    ```
+    # from container1's shell (we can confirm that we can ping container2 and vice-versa)
+
+    ping 10.240.3
+    PING 10.240.3 (10.240.0.3) 56(84) bytes of data.
+    64 bytes from 10.240.0.3: icmp_seq=1 ttl=64 time=0.079 ms
+    64 bytes from 10.240.0.3: icmp_seq=2 ttl=64 time=0.072 ms
+    64 bytes from 10.240.0.3: icmp_seq=3 ttl=64 time=0.071 ms
+
+
+    # from container2's shell
+    ping 10.240.0.2
+    PING 10.240.0.2 (10.240.0.2) 56(84) bytes of data.
+    64 bytes from 10.240.0.2: icmp_seq=1 ttl=64 time=0.036 ms
+    64 bytes from 10.240.0.2: icmp_seq=2 ttl=64 time=0.051 ms
+    ```
+
+5. Setup forwarding rules so egress from within the container can work
+
+  As a result of setting up forwarding rules in the step 4 above, we can also validate that we can ping out to the internet from within the container
+    
+    ```
+    ```
+
+
+
