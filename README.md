@@ -121,7 +121,7 @@ hostname
 sharadg-mint
 ```
 
-### Network, PID, User namespaces
+### Network, Mount, User namespaces
 
 Combining all these namespaces, plus PID and UTS namespaces is what ultimately you can use to isolate your processes in sandboxes, called "containers". Even though there is no such terminology for containers inside Linux kernel, but using these constructs in addition to cgroups and chroot/pivot_root system calls, you can create enough of an abstraction that you can collectively call the sandboxed process a container. But, before we create our own containers, let's briefly discuss cgroups.
 
@@ -229,8 +229,94 @@ tar xvf rootfs.tar -C ./rootfs
 
 ```
 
+## Mount namespaces, procfs, pivot_root, chroot
+
+We are going to use a Linux utility `unshare` which lets us run any program in different namespace(s). We will illustrate what it means to run in separate user, mount or network namespaces on our way to get a first class container working.
+
+```
+unshare -h
+
+Usage:
+ unshare [options] [<program> [<argument>...]]
+
+Run a program with some namespaces unshared from the parent.
+
+Options:
+ -m, --mount[=<file>]      unshare mounts namespace
+ -u, --uts[=<file>]        unshare UTS namespace (hostname etc)
+ -i, --ipc[=<file>]        unshare System V IPC namespace
+ -n, --net[=<file>]        unshare network namespace
+ -p, --pid[=<file>]        unshare pid namespace
+ -U, --user[=<file>]       unshare user namespace
+ -C, --cgroup[=<file>]     unshare cgroup namespace
+ -f, --fork                fork before launching <program>
+     --mount-proc[=<dir>]  mount proc filesystem first (implies --mount)
+ -r, --map-root-user       map current user to root (implies --user)
+     --propagation slave|shared|private|unchanged
+                           modify mount propagation in mount namespace
+ -s, --setgroups allow|deny  control the setgroups syscall in user namespaces
+
+ -h, --help                display this help
+ -V, --version             display version
+
+For more details see unshare(1).
+```
+
+As you notice, we will be passing different options to get a feel for remaining namespaces.
+
+
+- PID and Mount namspaces
+
+If we go back to PID namesapces for a second, and run the following command 
+
+```
+# You need root privilege to create new namespaces with unshare. 
+# Also, here we create a new PID namespace (-p) and also have unshare fork itself (-f) before create a child process with clone (to run chroot inside that child)
+sudo unshare -p -f chroot rootfs/ /bin/bash
+root@sharadg-mint:/# echo $$
+1
+```
+
+We can see that our shell has PID of 1 in the new namespace but if we execute `ps -eflx` in this shell, we notice something troubling
+
+```
+ps -eflx
+F   UID   PID  PPID PRI  NI    VSZ   RSS WCHAN  STAT TTY        TIME COMMAND
+4     0  9154  5838  20   0  84056  4840 poll_s S    ?          0:00 sudo unshare -p -f chroot rootfs/ /bin/bash LS_COLORS=rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;0
+4     0  9155  9154  20   0   7456   756 wait   S    ?          0:00  \_ unshare -p -f chroot rootfs/ /bin/bash LS_COLORS=rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01
+4     0  9156  9155  20   0  18508  3408 wait   S    ?          0:00      \_ /bin/bash LS_COLORS=rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:
+4     0  9964  9156  20   0  26248  2624 -      R+   ?          0:00          \_ ps -eflx LS_COLORS=rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;
+...
+4     0  5622     1  20   0 366600 13372 poll_s Ssl  ?          0:00 /usr/lib/packagekit/packagekitd LANG=en_US.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=
+4     0  3676     1  20   0 632484 16464 poll_s Ssl  ?          0:00 /usr/sbin/NetworkManager --no-daemon LANG=en_US.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+...
+```
+
+That, in fact, we can see the entire process tree from the parent (global) namespace. It's because of the fact that utilities such as `ps` relies on process data read for `proc` psuedo filesystem, typically mounted at `/proc`. In order to hide our parent process data, we need to do 2 things: create a new mount namespace, and then re-mount `procfs` at `/proc` which will only expose process data from our current PID namspace. Like so,
+
+```
+# Unshare allows us to do both of these steps by letting us specify --mount-proc option
+
+sudo unshare -p  -f --mount-proc=./rootfs/proc chroot rootfs/ /bin/bash
+root@sharadg-mint:/# echo $$
+1
+root@sharadg-mint:/# ps -efl 
+F S UID        PID  PPID  C PRI  NI ADDR SZ WCHAN  STIME TTY          TIME CMD
+4 S root         1     0  0  80   0 -  4627 wait   06:05 ?        00:00:00 /bin/bash
+0 R root         5     1  0  80   0 -  8600 -      06:06 ?        00:00:00 ps -efl
+root@sharadg-mint:/# 
+
+# if unshare complains about mounting ./rootfs/proc as procfs, then you may need to run the following once before running the above command
+
+sudo mount -t proc proc ./rootfs/proc/
+```
+
+This will be our main sequence of activities while creating our own container runtime - create a new mount namespace, `pivot_root` or `chroot` to a new rootfs, mount procfs at `/proc' before `cloning` the process that will run in our newly created container.
+
+
 ## Containter networking (veth pairs)
 
-## Mount namespaces, procfs, pivot_root, chroot
+Please see a very good explanation of [container networking using veth pairs](http://tejom.github.io/c/linux/containers/docker/networking/2016/10/08/containers-from-scratch-pt2-networking.html)
+
 
 ## Combining everything into a running container
