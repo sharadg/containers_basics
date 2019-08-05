@@ -62,6 +62,7 @@ Options can be:
     -v   Display verbose messages
 ```
 
+For the curious, there is a set of detailed posts by [Michael Kerrisk over at LWN about Linux namspaces](https://lwn.net/Articles/531114/) if you want to get into the details of it.
 ### PID namespace
 
 We are going to use this utility to run our `fork_and_exec` program inside a new `PID` namespace (by passing `-p` flag, `-v` for verbose output).
@@ -528,7 +529,7 @@ We are now going to create our [basic_container.c](basic_container/basic_contain
     64 bytes from 10.240.0.2: icmp_seq=3 ttl=64 time=0.075 ms
     ```
 
-    But, you would not be able to ping one container from another container. In order to make that work, setup `iptables` forwarding rules from the parent shell
+    And, you would also be able to ping one container from another container. In case that doesn't work, setup `iptables` forwarding rules from the parent shell
 
     ```
     # in parent shell
@@ -536,9 +537,13 @@ We are now going to create our [basic_container.c](basic_container/basic_contain
     cat setup_forwarding.sh 
     #! /bin/bash
     
+    sysctl -w net.ipv4.ip_forward=1
     iptables -A FORWARD -s 10.240.0.0/16 -j ACCEPT
     iptables -A FORWARD -d 10.240.0.0/16 -j ACCEPT
     iptables -t nat -A POSTROUTING -s 10.240.0.0/24 ! -o cni0 -j MASQUERADE
+    ...
+
+    # run it with root permissions
 
     sudo ./setup_forwarding.sh
     ```
@@ -560,12 +565,40 @@ We are now going to create our [basic_container.c](basic_container/basic_contain
     64 bytes from 10.240.0.2: icmp_seq=2 ttl=64 time=0.051 ms
     ```
 
+    We can also use `netcat` or `nc` utility to create a listening process on container1 and try to connect to it from container2
+
+    ```
+    # on container1
+    root@inside_container:/# nc -l -p 9999
+    hello from container2
+    hey from container1!
+
+
+    # on container2
+    root@inside_container:/# nc 10.240.0.2 9999
+    hello from container2
+    hey from container1!
+    ```
+
 5. Setup forwarding rules so egress from within the container can work
 
-  As a result of setting up forwarding rules in the step 4 above, we can also validate that we can ping out to the internet from within the container
+    As a result of setting up forwarding rules in the step 4 above, we can also validate that we can ping out to the internet from within the container. If you didn't run the `setup_forwarding.sh` script in previous step, do so now
     
     ```
+    # basically you need this one rule in the parent shell
+    sudo iptables -t nat -A POSTROUTING -s 10.240.0.0/24 ! -o cni0 -j MASQUERADE
+
+    # Then, from one of the containers you can confirm internet connectivity
+    root@inside_container:/# ping 8.8.8.8
+    PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.
+    64 bytes from 8.8.8.8: icmp_seq=1 ttl=127 time=10.8 ms
+    64 bytes from 8.8.8.8: icmp_seq=2 ttl=127 time=10.8 ms
+    64 bytes from 8.8.8.8: icmp_seq=3 ttl=127 time=11.6 ms
+    ^C
+    --- 8.8.8.8 ping statistics ---
+    3 packets transmitted, 3 received, 0% packet loss, time 2004ms
+    rtt min/avg/max/mdev = 10.812/11.087/11.635/0.387 ms
     ```
 
 
-
+**That's it, folks! We came very far all the way from learning about namespaces, cgroups to having a bare bones container runtime implementation**
