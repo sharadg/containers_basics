@@ -41,10 +41,11 @@ main(int argc, char *argv[])
       errExit("fork");
     
     if (pid != 0) {                 /* Parent */
-      printf("Parent (PID=%ld) created child with PID %ld\n",
+      printf("Grand-Parent\n--(PID=%ld)\n",
+             (long) getppid());
+      printf("Parent\n----(PID=%ld) created\nChild\n------(PID=%ld)\n",
              (long) getpid(), (long) pid);
-      printf("Parent (PID=%ld; PPID=%ld) waiting on it's child\n",
-             (long) getpid(), (long) getppid());
+      printf("(((( Parent waiting on it's child ))))\n");
       
       if (waitpid(-1, NULL, 0) == -1)     /* Wait for child */
         errExit("waitpid");
@@ -53,10 +54,10 @@ main(int argc, char *argv[])
 
     /* Child falls through to code below */
     
-    printf("\nChild  (PID=%ld) exists with parent PID=%ld\n",
+    printf("\nChild (PID=%ld) exists with Parent (PID=%ld)\n.....\n",
            (long) getpid(), (long) getppid());
     
-    sleep(1);
+    sleep(3);
     execvp(argv[optind], &argv[optind]);
     errExit("execvp");
 }

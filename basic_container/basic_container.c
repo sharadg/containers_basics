@@ -41,9 +41,7 @@ int pivot_root(char *a, char *b) {
     if (mount(a, a, "bind", MS_BIND | MS_REC, "") < 0) {
         errExit("error mount");
     }
-//    if (mkdir(b, 0755) < 0) {
-//        errExit("error mkdir");
-//    }
+
     printf("pivot setup ok\n");
 
     return syscall(SYS_pivot_root, a, b);
@@ -202,25 +200,17 @@ static int childFunc(void *arg) {
 
     /* set various mount points and network interfaces */
 
-//    if (unshare(CLONE_NEWNS) < 0)
-//        errExit("unshare issue");
-//    if (umount2("/proc", MNT_DETACH) < 0)
-//        errExit("error unmount");
-
     if (pivot_root("./rootfs", "./rootfs/.old") < 0) {
         errExit("error pivot");
     }
-//    mount("tmpfs", "/dev", "tmpfs", MS_NOSUID | MS_STRICTATIME, NULL);
     if (mount("proc", "/proc", "proc", 0, NULL) < 0)
         errExit("error mounting new procfs");
-//    mount("t", "/sys", "sysfs", 0, NULL);
-    chdir("/"); //change to root dir, man page for pivot_root suggests this
+
+    //change to root dir, man page for pivot_root suggests this
+    chdir("/");
+    
     if (umount2("/.old", MNT_DETACH) < 0)
         errExit("error unmount old");
-
-//    if (rmdir("/.old") < 0) {
-//        errExit("error rmdir");
-//    }
 
     system("ip link set veth1 up");
 
